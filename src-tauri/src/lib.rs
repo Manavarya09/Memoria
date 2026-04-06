@@ -87,37 +87,49 @@ impl AppState {
     }
 }
 
-pub fn init_logging(data_dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+/// Initializes logging with a daily-rotating file appender and stdout output.
+///
+/// Returns a `WorkerGuard` that **must** be held for the lifetime of the
+/// application.  Dropping the guard causes the non-blocking writer to flush
+/// remaining logs and stop accepting new writes, so storing it in the caller
+/// is essential for reliable file logging.
+pub fn init_logging(data_dir: &std::path::Path) -> Result<tracing_appender::non_blocking::WorkerGuard, Box<dyn std::error::Error + Send + Sync>> {
     let logs_dir = data_dir.join("logs");
     std::fs::create_dir_all(&logs_dir)?;
-    
+
     let file_appender = RollingFileAppender::new(
         Rotation::DAILY,
         logs_dir,
         "memoria.log",
     );
-    
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-    
+
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+
     let subscriber = tracing_subscriber::registry()
         .with(EnvFilter::new("info"))
         .with(fmt::layer().with_writer(non_blocking))
         .with(fmt::layer().with_writer(std::io::stdout));
-    
+
     tracing::subscriber::set_global_default(subscriber)?;
-    
+
     info!("Memoria logging initialized");
-    
-    Ok(())
+
+    Ok(guard)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let settings = Settings::load().unwrap_or_default();
     
-    if let Err(e) = init_logging(&settings.data_dir) {
-        eprintln!("Failed to initialize logging: {}", e);
-    }
+    // Hold the guard for the lifetime of the application so the
+    // non-blocking file writer keeps flushing logs to disk.
+    let _log_guard = match init_logging(&settings.data_dir) {
+        Ok(guard) => Some(guard),
+        Err(e) => {
+            eprintln!("Failed to initialize logging: {}", e);
+            None
+        }
+    };
     
     info!("Starting Memoria v{}", env!("CARGO_PKG_VERSION"));
     
